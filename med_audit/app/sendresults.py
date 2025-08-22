@@ -5,6 +5,7 @@ from email.mime.application import MIMEApplication
 # get todays date in format MM_DD_YYYY
 from datetime import date
 
+ENABLE_DEBUG = False
 
 def send_results():
     # Get todays date
@@ -16,9 +17,14 @@ def send_results():
     msg = MIMEMultipart()
     msg['Subject'] = f'MED Audit for {today}'
     msg['From'] = 'tel_eng_reports@granitevoip.com'
-    msg['To'] = 'fpike@granitenet.com'
-    cc_recipients = ['dpersson@granitenet.com', 'kegrabhorn@granitenet.com', 'pgreen@granitenet.com', 'smcelroy@granitenet.com' ]
-    msg['CC'] = ', '.join(cc_recipients)
+    if ENABLE_DEBUG:
+        msg['To'] = 'dpersson@granitenet.com'
+    else:
+        msg['To'] = 'fpike@granitenet.com'
+    
+    if not ENABLE_DEBUG:
+        cc_recipients = ['dpersson@granitenet.com', 'kegrabhorn@granitenet.com', 'pgreen@granitenet.com', 'smcelroy@granitenet.com' ]
+        msg['CC'] = ', '.join(cc_recipients)
     msg.attach(MIMEText('Please see attached Audit for My Eye Dr', 'plain'))
 
 
@@ -34,6 +40,9 @@ def send_results():
 
     server = smtplib.SMTP(smtp_server, 25)
 
-    all_recipients = [msg['To']] + cc_recipients
+    if ENABLE_DEBUG:
+        all_recipients = [msg['To']]
+    else:
+        all_recipients = [msg['To']] + cc_recipients
     server.send_message(msg, from_addr=msg['From'], to_addrs=all_recipients)
     server.quit()

@@ -7,12 +7,13 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.by import By
 from soap import send_soap, eas_base_information
 from SeleniumInterface import SeleniumInterfaceBase
+from MetaViewWebInterface import MetaViewWebInterface
 from bs4 import BeautifulSoup
 from sendresults import send_results
 import logging
 import sys
 from pythonjsonlogger import jsonlogger
-
+import os
 
 # Configure logging
 logger = logging.getLogger()
@@ -30,136 +31,185 @@ class MyEyeDrAudit(SeleniumInterfaceBase):
     def __init__(self):
         super().__init__()
         self.wait = WebDriverWait(self.driver, 20)
+        self.mvw_username = os.getenv('MVW_USERNAME')
+        self.mvw_password = os.getenv('MVW_PASSWORD')
+        self.results_container = {}
 
+    def get_profile_info(self, tn):
+        """Get EAS profile information to determine BCM vs ICM"""
+        try:
+            # Get the EAS Profile information (we still need this for BCM/ICM detection)
+            eas_env = eas_base_information.format(tn=tn)
+            eas_result = send_soap(eas_env)
+            eas_soup = BeautifulSoup(eas_result, features="xml")
+            eas_result_code = eas_soup.find('ResultCode').text
+            
+            if eas_result_code != "2001":
+                return None, 'Unable to get Profile Information'
+
+            eas_profile = eas_soup.find('CoSID').text
+
+            # Check for profiles that don't have CommPortal access
+            if 'emulated_pots' in eas_profile.lower() or 'grt_base' in eas_profile.lower():
+                return None, 'No Commportal Access'
+
+            # Determine if BCM or ICM profile
+            bcm_profiles = ['business']
+            if list(filter(lambda x: x in eas_profile.lower(), bcm_profiles)):
+                return 'bcm', None
+            else:
+                return 'icm', None
+                
+        except Exception as e:
+            print(f"Error getting profile for {tn}: {e}")
+            return None, 'Error getting profile'
+
+    def audit_call_forwarding(self, tn, call_handler):
+        """Audit call forwarding settings in the current CommPortal tab"""
+        try:
+            # Determine the correct element IDs based on call handler type
+            if call_handler == 'bcm':
+                forward_radio_id = 'dcfEnabledTrue'
+                forward_point_to_id = 'jsShowIf-DCF-Number._-NotEquals- jsFunction-setDCFForwardingDestinationName'
+            else:  # icm
+                forward_radio_id = 'summaryRadioForwardTo'
+                forward_point_to_id = 'summarySelectForwardTo'
+
+            # Find the new iframe and switch to it (existing CommPortal logic)
+            iframe = self.wait.until(EC.visibility_of_element_located((By.ID, 'iFrameResizer0')))
+            self.driver.switch_to.frame(iframe)
+
+            # Check forwarding status
+            forward_radio = self.wait.until(EC.visibility_of_element_located((By.ID, forward_radio_id)))
+
+            if forward_radio.is_displayed():
+                is_forwarding = forward_radio.is_selected()
+                forwarding_destination = None
+                
+                if is_forwarding:
+                    if call_handler == 'icm':
+                        forwarding_destination = self.driver.find_elements(By.ID, forward_point_to_id)
+                        forwarding_destination = forwarding_destination[0].get_attribute('value')
+                    else:
+                        forwarding_destination = self.driver.find_elements(By.CLASS_NAME, forward_point_to_id)
+                        forwarding_destination = forwarding_destination[0].text
+                    # Remove anything that is not a number from the forwarding destination
+                    forwarding_destination = ''.join(filter(str.isdigit, forwarding_destination))
+            else:
+                is_forwarding = False
+                forwarding_destination = None
+
+            # Check for time of day handling (ICM only)
+            is_using_schedule = False
+            if call_handler == 'icm':
+                if self.driver.find_element(By.ID, 'summaryRadioSchedules').is_displayed():
+                    is_using_schedule = self.driver.find_element(By.ID, 'summaryRadioSchedules').is_selected()
+
+            # Determine status
+            status = 'Neither'
+            if is_using_schedule:
+                status = 'Using Schedule'
+            elif is_forwarding:
+                status = 'Forwarding to ' + forwarding_destination
+
+            return status
+
+        except Exception as e:
+            print(f'Error auditing call forwarding for {tn}: {e}')
+            return 'Error during audit'
+
+    def record_result(self, tn, status):
+        """Record the audit result for a telephone number"""
+        self.results_container[tn] = status
+        logging.info(f"TN: {tn} - Status: {status}")
+
+    def write_results_to_csv(self):
+        """Write the results container to a CSV file"""
+        with open('results.csv', 'w') as f:
+            for key in self.results_container.keys():
+                f.write("%s,%s\n" % (key, self.results_container[key]))
+
+    def send_email_results(self):
+        """Send the results via email"""
+        send_results()
 
     def run(self, tns: list):
-        results_container = {}
+        # Initialize MetaView Web interface (replaces SOAP setup)
+        mvw_interface = MetaViewWebInterface(self)
+        
+        # Login to MetaView Web (one-time at start)
+        if not mvw_interface.login_to_metaview():
+            raise Exception("Failed to login to MetaView Web - check credentials")
+        
+        # Store main tab as MetaView Web tab
+        self.tab_handles["metaview_main"] = self.driver.current_window_handle
+        
         count = 1
         total = len(tns)
+        
+        # Process each telephone number
         for tn in tns:
             logging.info(f"Working on TN: {tn}  {count}/{total}")
             count += 1
+            
             try:
-                # Get the EAS Password
-                eas_env = eas_base_information.format(tn=tn)
-                eas_result = send_soap(eas_env)
-                eas_soup = BeautifulSoup(eas_result, features="xml")
-                eas_result_code = eas_soup.find('ResultCode').text
-                if eas_result_code != "2001":
-                    results_container[tn] = 'Unable to get Password'
+                # Get profile information to determine BCM vs ICM (still needed for audit logic)
+                call_handler, profile_error = self.get_profile_info(tn)
+                if profile_error:
+                    self.record_result(tn, profile_error)
                     continue
-
-                # BCM and ICM have different ids for commportal fields so we need to identify which one we are using
-                bcm_profiles = ['business']
-                eas_profile = eas_soup.find('CoSID').text
-
-                # We have a special case where emulated_pots has EAS service but not commportal access
-                if 'emulated_pots' in eas_profile.lower() or \
-                    'grt_base' in eas_profile.lower():
-                    results_container[tn] = 'No Commportal Access'
-                    continue
-
-                # Check if the eas profile is a BCM profile
-                if list(filter(lambda x: x in eas_profile.lower(), bcm_profiles)):
-                    forward_radio_id = 'dcfEnabledTrue'
-                    forward_point_to_id = 'jsShowIf-DCF-Number._-NotEquals- jsFunction-setDCFForwardingDestinationName'
-                    call_handler = 'bcm'
-                else:
-                    forward_radio_id = 'summaryRadioForwardTo'
-                    forward_point_to_id = 'summarySelectForwardTo'
-                    call_handler = 'icm'
-
-                # Now we try to find the password
-                eas_password = eas_soup.find('Password')
-                if eas_password:
-                    eas_password = eas_password.text
-                else:
-                    results_container[tn] = 'No Password'
-                    continue
-
-                # Remove any cookies if they exist
-                self.driver.delete_all_cookies()
-
                 
-                #go to compportal
-                self.driver.get("https://commportal.granitevoip.com/#login.html")
-
-                # Make sure the instance is on the default content
-                self.driver.switch_to.default_content()
-
-                # Find the login form iframe
-                iframe = self.wait.until(EC.visibility_of_element_located((By.ID, 'embedded')))
-
-                # Switch to the iframe
-                self.driver.switch_to.frame(iframe)
-
-                # Find and fill in the Number field
-                directory_number_field = self.wait.until(EC.visibility_of_element_located((By.ID, 'DirectoryNumberDummy')))
-                directory_number_field.send_keys(tn)
-
-                # Find and fill in the password field
-                directory_number_field = self.driver.find_element(By.ID, "Password")
-                directory_number_field.send_keys(eas_password)
-
-                # Find and click the login button
-                self.driver.find_element(By.ID, 'loginSubmit').click()
+                # Search for subscriber in MetaView Web
+                subscriber_tab = mvw_interface.search_subscriber(tn)
                 
-                # Find the new iframe and switch to it
-                iframe = self.wait.until(EC.visibility_of_element_located((By.ID, 'iFrameResizer0')))
-                self.driver.switch_to.frame(iframe)
-
-                # .find_elements returns a list, so we need to reassign the variable to the first element in the list
-                # forward_radio = self.driver.find_elements(By.ID, forward_radio_id)[0]
-                forward_radio = self.wait.until(EC.visibility_of_element_located((By.ID, forward_radio_id)))
-
-                if forward_radio.is_displayed():
-                    is_forwarding = forward_radio.is_selected()
-                    forwarding_destination = None
-                    if is_forwarding:
-                        # .find_elements returns a list, so we need to reassign the variable to the first element in the list
-                        if call_handler == 'icm':
-                            forwarding_destination = self.driver.find_elements(By.ID, forward_point_to_id)
-                            forwarding_destination = forwarding_destination[0].get_attribute('value')
-                        else:
-                            forwarding_destination = self.driver.find_elements(By.CLASS_NAME, forward_point_to_id)
-                            forwarding_destination = forwarding_destination[0].text
-                        # Remove anything that is not a number from the forwarding destination
-                        forwarding_destination = ''.join(filter(str.isdigit, forwarding_destination))
-                else:
-                    is_forwarding = False
-                    forwarding_destination = None
-
-                # Find the radio button for time of day handling and check it
-                if call_handler == 'icm':
-                    if self.driver.find_element(By.ID, 'summaryRadioSchedules').is_displayed():
-                        is_using_schedule = self.driver.find_element(By.ID, 'summaryRadioSchedules').is_selected()
+                if subscriber_tab:
+                    # Open CommPortal for this subscriber
+                    commportal_tab = mvw_interface.open_commportal_for_subscriber(subscriber_tab)
+                    
+                    if commportal_tab:
+                        # Switch to CommPortal tab and run existing audit logic
+                        self.switch_to_tab(commportal_tab)
+                        
+                        # Clear cookies and navigate to CommPortal login
+                        self.driver.delete_all_cookies()
+                        
+                        # Wait a moment for CommPortal to load
+                        try:
+                            # Try to wait for CommPortal interface to load
+                            WebDriverWait(self.driver, 10).until(
+                                EC.presence_of_element_located((By.TAG_NAME, "body"))
+                            )
+                            
+                            # Run the audit logic
+                            status = self.audit_call_forwarding(tn, call_handler)
+                            self.record_result(tn, status)
+                            
+                        except Exception as audit_error:
+                            print(f"Error during CommPortal audit for {tn}: {audit_error}")
+                            self.record_result(tn, "Error during audit")
+                        
+                        # Close CommPortal tab
+                        self.close_tab(commportal_tab)
                     else:
-                        is_using_schedule = False
+                        self.record_result(tn, "No CommPortal Access")
+                    
+                    # Close the subscriber tab within MetaView UI after all work is complete
+                    self.switch_to_tab("metaview_main")
+                    mvw_interface.close_subscriber_tab_in_ui(tn)
                 else:
-                    is_using_schedule = False
-
-                status = 'Neither'
-                if is_using_schedule:
-                    status = 'Using Schedule'
-                elif is_forwarding:
-                    status = 'Forwarding to ' + forwarding_destination
-
-
-                results_container[tn] = status
+                    self.record_result(tn, "Subscriber Not Found")
+                    
             except Exception as e:
-                # Log any exceptions
-                print(f'Error auditing {tn}: {e}')
-                results_container[tn] = 'Error'
+                print(f'Error processing {tn}: {e}')
+                self.record_result(tn, f"Error: {str(e)}")
+                # Ensure we're back on main tab after any error
+                self.switch_to_tab("metaview_main")
                 traceback.print_exc()
-                continue
-
-        # Write the results container to a csv file, column 1 will be the key, column 2 will be the value
-        with open('results.csv', 'w') as f:
-            for key in results_container.keys():
-                f.write("%s,%s\n"%(key,results_container[key]))
-
-        # Send the results with email
-        send_results()
+        
+        # Final cleanup and results
+        self.cleanup_subscriber_tabs()
+        self.write_results_to_csv()
+        self.send_email_results()
 
 
 if __name__ == "__main__":
