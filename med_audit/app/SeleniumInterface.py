@@ -17,7 +17,7 @@ class SeleniumInterfaceBase:
         # Configure the firefox options
         options = Options()
         options.add_argument('-private')
-        options.add_argument("--headless")
+        # options.add_argument("--headless")
         # options.set_preference('dom.webnotifications.enabled', False)
         # options.set_preference('browser.cache.disk.enable', False)
         # options.set_preference('browser.cache.memory.enable', False)

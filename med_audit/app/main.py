@@ -14,6 +14,7 @@ import logging
 import sys
 from pythonjsonlogger import jsonlogger
 import os
+import time
 
 # Configure logging
 logger = logging.getLogger()
@@ -146,10 +147,46 @@ class MyEyeDrAudit(SeleniumInterfaceBase):
         
         count = 1
         total = len(tns)
+        start_time = time.time()
+        restart_interval = 40  # Restart WebDriver every 40 subscribers to prevent cookie accumulation
         
         # Process each telephone number
         for tn in tns:
+            # Periodic WebDriver restart to prevent cookie/header accumulation
+            if count > 1 and (count - 1) % restart_interval == 0:
+                print(f"Restarting WebDriver session after {count - 1} subscribers to prevent HTTP 400 errors...")
+                
+                # Close current driver
+                self.driver.quit()
+                
+                # Re-initialize WebDriver with fresh session
+                super().__init__()
+                self.wait = WebDriverWait(self.driver, 20)
+                
+                # Re-create MetaView interface and login
+                mvw_interface = MetaViewWebInterface(self)
+                if not mvw_interface.login_to_metaview():
+                    raise Exception("Failed to re-login to MetaView Web after driver restart")
+                
+                # Update main tab handle
+                self.tab_handles["metaview_main"] = self.driver.current_window_handle
+                print(f"WebDriver restart complete, continuing with TN processing...")
+            # Calculate time estimation
+            if count > 1:
+                elapsed_time = time.time() - start_time
+                avg_time_per_tn = elapsed_time / (count - 1)
+                remaining_tns = total - count + 1
+                estimated_remaining_seconds = avg_time_per_tn * remaining_tns
+                
+                hours = int(estimated_remaining_seconds // 3600)
+                minutes = int((estimated_remaining_seconds % 3600) // 60)
+                
+                time_str = f"Estimated time remaining: {hours} Hours {minutes} Minutes"
+            else:
+                time_str = "Estimated time remaining: Calculating..."
+            
             logging.info(f"Working on TN: {tn}  {count}/{total}")
+            print(time_str)
             count += 1
             
             try:
