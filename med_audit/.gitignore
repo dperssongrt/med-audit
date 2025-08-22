@@ -1,0 +1,3 @@
+venv
+app/geckodriver
+app/results.csv
