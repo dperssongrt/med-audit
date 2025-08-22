@@ -51,3 +51,5 @@ From here you are logged into Metaview Web and the loop of looking up subscriber
 4. Click the Open in Commportal Button
 
 Once the Open in Commportal Button is clicked a new tab in the browser will open. The tab will be the users commportal interface and the script can continue as usual. After the forwarding has been audited we can close the browser tab that was just opeend. We can then also close the Metaview Web tab that was opened for the subscriber. The loop can move on to the next subscriber.
+
+I just did a test run and after about 45 subscribers the commportal server started returning an HTTP 400 error stating the request header or cookie is too large. What could be causing that?
